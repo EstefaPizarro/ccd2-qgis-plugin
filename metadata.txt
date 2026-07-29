@@ -1,0 +1,18 @@
+[general]
+name=CCD 2.0
+qgisMinimumVersion=3.24
+description=Continuous Change Detection (CCDC) point analysis from the QGIS canvas, using Google Earth Engine.
+version=0.1.0
+author=Estefania Pizarro
+email=epizarro04@gmail.com
+
+about=Straight port of CCD-Plugin (https://github.com/SMByC/CCD-Plugin) - pick a point, run CCDC (Continuous Change Detection and Classification), plot the fitted harmonic curve. Base for future improvements.
+
+tracker=
+repository=
+homepage=
+category=Plugins
+experimental=True
+deprecated=False
+tags=remote sensing,change detection,ccdc,google earth engine,time series
+icon=CCD_Plugin/icons/icon_satellite_timeseries_32x32.jpg

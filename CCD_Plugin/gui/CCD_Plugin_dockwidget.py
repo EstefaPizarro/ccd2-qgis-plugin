@@ -1,0 +1,593 @@
+"""
+/***************************************************************************
+ CCD Plugin
+                                 A QGIS plugin
+ Continuous Change Detection Plugin
+                              -------------------
+        copyright            : (C) 2019-2026 by Xavier Corredor Llano, SMByC
+        email                : xavier.corredor.llano@gmail.com
+ ***************************************************************************/
+
+/***************************************************************************
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ ***************************************************************************/
+
+with the collaboration of Daniel Moraes <moraesd90@gmail.com>
+
+"""
+
+import os
+from collections import OrderedDict
+from typing import ClassVar
+
+from qgis.core import (
+    Qgis,
+    QgsApplication,
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsPointXY,
+    QgsProject,
+    QgsSettings,
+    QgsTask,
+)
+from qgis.gui import QgsMapTool, QgsVertexMarker
+from qgis.PyQt import QtWidgets, uic
+from qgis.PyQt.QtCore import QDate, Qt, QUrl, pyqtSignal
+from qgis.PyQt.QtGui import QColor, QDesktopServices, QIcon
+from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox
+from qgis.utils import iface
+
+plugin_folder = os.path.dirname(os.path.dirname(__file__))
+
+# ~0.001 degrees (~100 m) - small square sent as #geoJson= to the user's published
+# Earth Engine App (open_gee_app), same spirit as core/dashboard.py's buffer.
+GEE_APP_POINT_BUFFER_DEG = 0.001
+
+# Try QWebEngine first (Qt6 / QGIS 4.x, and Qt5 with WebEngine), then fall back to QtWebKit (Qt5 / QGIS 3.x)
+HAS_WEBENGINE = False
+HAS_WEBKIT = False
+
+try:
+    # ponytail: blank/invisible embedded QWebEngineView is a known Chromium-GPU-compositing
+    # issue on Windows (integrated/driver-blocklisted GPUs) - must be set before the engine's
+    # first init anywhere in the QGIS process, hence right before this import.
+    os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-gpu")
+
+    from qgis.PyQt.QtWebEngineCore import QWebEngineSettings
+    from qgis.PyQt.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+
+    HAS_WEBENGINE = True
+    FORM_CLASS, _ = uic.loadUiType(os.path.join(plugin_folder, "ui", "CCD_Plugin_dockwidget_QWebEngine.ui"))
+except ImportError:
+    pass
+
+if not HAS_WEBENGINE:
+    try:
+        from qgis.PyQt.QtWebKit import QWebSettings
+
+        HAS_WEBKIT = True
+        FORM_CLASS, _ = uic.loadUiType(os.path.join(plugin_folder, "ui", "CCD_Plugin_dockwidget_QWebView.ui"))
+    except ImportError:
+        pass
+
+if not HAS_WEBENGINE and not HAS_WEBKIT:
+    msg = (
+        "CCD-Plugin needs QtWebEngine or QtWebKit in your Qt/QGIS installation. See the options here:\n\n"
+        "https://github.com/SMByC/CCD-Plugin#installation"
+    )
+    QMessageBox.critical(None, "CCD-Plugin: Error loading", msg, QMessageBox.StandardButton.Ok)
+    raise ImportError(msg)
+
+
+from CCD_Plugin.core.ccd_process import compute_ccd  # noqa: E402
+from CCD_Plugin.core.plot import generate_plot  # noqa: E402
+from CCD_Plugin.gui.advanced_settings import AdvancedSettings  # noqa: E402
+from CCD_Plugin.utils.config import get_plugin_config, restore_plugin_config  # noqa: E402
+from CCD_Plugin.utils.system_utils import error_handler, wait_process  # noqa: E402
+
+
+class CCD_PluginDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
+    closingPlugin = pyqtSignal()
+
+    def __init__(self, id, canvas=None, parent=None):
+        """Constructor."""
+        super().__init__(parent)
+        # Set up the user interface from Designer through FORM_CLASS.
+        # After self.setupUi() you can access any designer object by doing
+        # self.<objectname>, and you can use autoconnect slots - see
+        # http://qt-project.org/doc/qt-4.8/designer-using-a-ui-file.html
+        # #widgets-and-dialogs-with-auto-connect
+        self.id = id
+        self.canvas = canvas if canvas is not None else [iface.mapCanvas()]
+        self.config = None
+        self.last_config = None
+
+        self.setupUi(self)
+        self.setup_gui()
+
+    def setup_gui(self):
+        # select swir1 band by default
+        self.band_or_index_to_plot.setCurrentIndex(4)
+        # disable the item "---"
+        self.band_or_index_to_plot.model().item(6).setEnabled(False)
+        # set the collection to 2 by default
+        self.dataset.setCurrentIndex(1)
+        # set break point bands/indices
+        self.box_breakpoint_bands.addItems(
+            [
+                "Blue",
+                "Green",
+                "Red",
+                "NIR",
+                "SWIR1",
+                "SWIR2",
+                "NDVI",
+                "NBR",
+                "EVI",
+                "EVI2",
+                "BRIGHTNESS",
+                "GREENNESS",
+                "WETNESS",
+            ]
+        )
+        self.box_breakpoint_bands.setCheckedItems(["Blue", "Green", "Red", "NIR", "SWIR1", "SWIR2"])
+        # set the current date
+        self.end_date.setDate(QDate.currentDate())
+        # set action center on point
+        self.focus_on_the_coordinates.clicked.connect(self.show_ang_go_to_the_coordinates)
+        # set action when change the band or index repaint the plot
+        self.band_or_index_to_plot.currentIndexChanged.connect(lambda: self.repaint_plot())
+
+        self.default_map_tools = [canvas.mapTool() for canvas in self.canvas]
+        self.pick_on_map.clicked.connect(self.setup_map_tool)
+        self.delete_markers.clicked.connect(PickerCoordsOnMap.delete_markers)
+
+        self.generate_button.clicked.connect(lambda: self.new_plot())
+
+        # plot web view settings
+        plot_view_settings = self.plot_webview.settings()
+        if HAS_WEBENGINE:
+            plot_view_settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptEnabled, True)
+            plot_view_settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+            plot_view_settings.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, True)
+        elif HAS_WEBKIT:
+            plot_view_settings.setAttribute(QWebSettings.JavascriptEnabled, True)
+            plot_view_settings.setAttribute(QWebSettings.WebGLEnabled, True)
+            plot_view_settings.setAttribute(QWebSettings.Accelerated2dCanvasEnabled, True)
+        self.plot_webview.setZoomFactor(0.85)
+
+        # advanced settings dialog
+        self.advanced_settings = AdvancedSettings()
+        self.btm_advanced_settings.clicked.connect(self.advanced_settings.show)
+
+        # restore the plugin configuration from a yaml file
+        self.restore_configuration.clicked.connect(lambda: self.restore_plugin_from_yaml())
+
+        # save the plugin configuration to a yaml file
+        self.save_configuration.clicked.connect(lambda: self.save_plugin_to_yaml())
+
+        # open the current html file in the web browser
+        self.html_file = None
+        self.btm_open_web_browser.clicked.connect(self.open_plot_in_web_browser)
+
+        # Dashboard: composite thumbnail + existing CCDC chart, opened in the system browser.
+        # Created at runtime (not in the .ui) - avoids duplicating it across the two near-
+        # identical .ui variants (QWebEngine/QWebView).
+        self.btm_dashboard = QtWidgets.QToolButton()
+        self.btm_dashboard.setText("Dashboard")
+        self.btm_dashboard.setToolTip("Build a composite + CCDC chart dashboard and open it in the web browser")
+        self.btm_dashboard.setIcon(QIcon(":/plugins/CCD_Plugin/icons/open_in_web_browser.svg"))
+        self.btm_dashboard.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        dashboard_layout = self.widget_5.layout()
+        dashboard_layout.insertWidget(dashboard_layout.indexOf(self.btm_open_web_browser), self.btm_dashboard)
+        self.btm_dashboard.clicked.connect(lambda: self.open_dashboard())
+
+        # GEE App: opens the user's own published Earth Engine App (see gee_app/
+        # ccd_dashboard_app.js) with the current point, for a fully interactive
+        # multi-sensor/year-slider dashboard the app computes itself in the browser.
+        self.btm_gee_app = QtWidgets.QToolButton()
+        self.btm_gee_app.setText("GEE App")
+        self.btm_gee_app.setToolTip("Open your published Earth Engine App with this point")
+        dashboard_layout.insertWidget(dashboard_layout.indexOf(self.btm_open_web_browser), self.btm_gee_app)
+        self.btm_gee_app.clicked.connect(lambda: self.open_gee_app())
+
+        # enable/disable days of year when start day or end day is changed
+        self.start_date.dateChanged.connect(lambda: self.enable_disable_days_of_year())
+        self.end_date.dateChanged.connect(lambda: self.enable_disable_days_of_year())
+
+    def enable_disable_days_of_year(self):
+        # only enable the days of year if the date range is greater than 1 year
+        start_date = self.start_date.date()
+        end_date = self.end_date.date()
+        self.advanced_settings.doy_widget.setEnabled(start_date.daysTo(end_date) >= 365)
+
+    def closeEvent(self, event):
+        # close
+        self.closingPlugin.emit()
+        event.accept()
+
+    def setup_map_tool(self, checked):
+        if checked:
+            # set the map tool to pick coordinates
+            for canvas, default_map_tool in zip(self.canvas, self.default_map_tools):
+                canvas.unsetMapTool(default_map_tool)
+                canvas.setMapTool(PickerCoordsOnMap(self, canvas), clean=True)
+        else:
+            # finish, set default map tool to canvas
+            for canvas, default_map_tool in zip(self.canvas, self.default_map_tools):
+                canvas.setMapTool(default_map_tool, clean=True)
+
+    def _get_ee_project(self):
+        """Ask once per user for the Earth Engine Cloud project ID and remember it via
+        QgsSettings (per QGIS profile) - works for any user installing the plugin,
+        no env var/system config needed. EE_PROJECT env var still overrides if set."""
+        settings = QgsSettings()
+        key = "CCD_Plugin/ee_project_v2"  # _v2: force a fresh prompt, a bad value got cached under the old key
+        project = (settings.value(key, "", type=str) or os.getenv("EE_PROJECT") or "").strip()
+        if not project:
+            project, ok = QtWidgets.QInputDialog.getText(
+                self, "Earth Engine project",
+                "Enter your Google Earth Engine Cloud project ID\n(see code.earthengine.google.com > Settings):",
+            )
+            project = project.strip()
+            if not ok or not project:
+                raise Exception("Earth Engine project required|Enter your GEE Cloud project ID to continue.")
+            settings.setValue(key, project)
+        return project
+
+    def _get_gee_app_url(self):
+        """Ask once per user for their published Earth Engine App URL (see gee_app/
+        ccd_dashboard_app.js for the script to publish) and remember it via QgsSettings,
+        same pattern as _get_ee_project()."""
+        settings = QgsSettings()
+        key = "CCD_Plugin/gee_app_url"
+        url = (settings.value(key, "", type=str) or "").strip()
+        if not url:
+            url, ok = QtWidgets.QInputDialog.getText(
+                self, "Earth Engine App",
+                "Paste your published Earth Engine App URL\n"
+                "(paste gee_app/ccd_dashboard_app.js into code.earthengine.google.com, "
+                "then Apps > Publish new App):",
+            )
+            url = url.strip()
+            if not ok or not url:
+                raise Exception("Earth Engine App URL required|Publish your app first, then paste its URL here.")
+            settings.setValue(key, url)
+        return url
+
+    @error_handler
+    def new_plot(self):
+        # before start the process
+        # check import ee lib
+        try:
+            import ee
+
+            # current earthengine-api requires a Cloud project on every Initialize() call
+            ee.Initialize(project=self._get_ee_project())
+        except Exception as err:
+            raise Exception(f"Error importing ee lib, check the installation or your internet connection|{err}")
+
+        # get the current configuration of the plugin
+        config = get_plugin_config(self.id)
+        if not config:
+            return
+
+        # check if the plugin settings have changed compared to the last plot, except for the band_or_index_to_plot
+        if self.last_config and self.last_config == OrderedDict(
+            (k, v) for k, v in config.items() if k != "band_or_index_to_plot"
+        ):
+            return
+
+        self.clean_plot()
+        self.generate_button.setEnabled(False)
+        self.plot_webview.load(QUrl.fromLocalFile(os.path.join(plugin_folder, "ui", "loading.html")))
+
+        # start the process
+        # perform CCD as a background task
+        globals()["task"] = QgsTask.fromFunction(
+            "Compute CCD", self.compute_ccd, on_finished=self.ccd_completed, config=config
+        )
+        QgsApplication.taskManager().addTask(globals()["task"])
+
+        # after finish the process
+        self.pick_on_map.click()
+
+    @staticmethod
+    def compute_ccd(task, config):
+        ccdc_result_info, timeseries = compute_ccd(
+            coords=(config["lon"], config["lat"]),
+            date_range=(config["start_date"], config["end_date"]),
+            doy_range=(config["start_doy"], config["end_doy"]),
+            dataset=config["dataset"],
+            breakpoint_bands=config["breakpoint_bands"],
+            tmask_bands=None,
+            num_obs=config["num_obs"],
+            chi_square=config["chi_square"],
+            min_years=config["min_years"],
+            lambda_lasso=config["lambda_lasso"],
+        )
+
+        return config, ccdc_result_info, timeseries
+
+    def ccd_completed(self, exception, result=None):
+        if exception is None and result is not None:
+            # CCD process completed successfully
+            config, ccdc_result_info, timeseries = result
+
+            if not ccdc_result_info["tBreak"]:
+                msg = "No enough data for this period to perform change detection, plotting only the observed values."
+                self.MsgBar.clearWidgets()
+                self.MsgBar.pushMessage("CCD-Plugin", msg, level=Qgis.MessageLevel.Info, duration=10)
+
+            self.html_file = generate_plot(
+                self.id,
+                ccdc_result_info,
+                timeseries,
+                (config["start_date"], config["end_date"]),
+                config["dataset"],
+                config["band_or_index_to_plot"],
+            )
+
+            self.plot_webview.load(QUrl.fromLocalFile(self.html_file))
+
+            self.last_config = OrderedDict((k, v) for k, v in config.items() if k != "band_or_index_to_plot")
+        else:
+            msg = f"Error computing CCD: {exception}"
+            self.MsgBar.clearWidgets()
+            self.MsgBar.pushMessage("CCD-Plugin", msg, level=Qgis.MessageLevel.Warning, duration=10)
+            self.plot_webview.setHtml("")
+
+        # finish
+        self.generate_button.setEnabled(True)
+
+    @wait_process
+    def repaint_plot(self):
+        from CCD_Plugin.core.ccd_process import ccd_results
+
+        self.clean_plot()
+
+        if not ccd_results:
+            return
+
+        # get the current configuration of the plugin
+        config = get_plugin_config(self.id)
+        coords = (config["lon"], config["lat"])
+        date_range = (config["start_date"], config["end_date"])
+        doy_range = (config["start_doy"], config["end_doy"])
+        dataset = config["dataset"]
+        band_or_index_to_plot = config["band_or_index_to_plot"]
+        breakpoint_bands = tuple(config["breakpoint_bands"])
+
+        # check if ccd results are already computed
+        if (coords, date_range, doy_range, dataset, breakpoint_bands) in ccd_results:
+            ccdc_result_info, timeseries = ccd_results[(coords, date_range, doy_range, dataset, breakpoint_bands)]
+            self.html_file = generate_plot(
+                self.id, ccdc_result_info, timeseries, date_range, dataset, band_or_index_to_plot
+            )
+            self.plot_webview.load(QUrl.fromLocalFile(self.html_file))
+
+    @error_handler
+    def restore_plugin_from_yaml(self):
+        """restore the configuration of the plugin from a YAML file"""
+        import yaml
+
+        yaml_path, _ = QFileDialog.getOpenFileName(
+            self, "Restore the CCD plugin configuration from a YAML file", "", "YAML Files (*.yaml);;All Files (*)"
+        )
+
+        if yaml_path == "" or not os.path.isfile(yaml_path):
+            return
+
+        with open(yaml_path) as stream:
+            try:
+                config = yaml.safe_load(stream)
+            except Exception as err:
+                raise Exception(f"Error reading the YAML file to restore the CCD plugin, see more:|{err}")
+
+        try:
+            restore_plugin_config(self.id, config)
+        except Exception as err:
+            raise Exception(f"Error restoring the configuration of the CCD plugin, see more:|{err}")
+
+    @error_handler
+    def save_plugin_to_yaml(self):
+        """save the configuration of the plugin to a YAML file"""
+        import yaml
+
+        def setup_yaml():
+            """Keep dump ordered with orderedDict"""
+
+            def represent_dict_order(self, data):
+                return self.represent_mapping("tag:yaml.org,2002:map", list(data.items()))
+
+            yaml.add_representer(OrderedDict, represent_dict_order)
+
+        setup_yaml()
+        config = get_plugin_config(self.id)
+        yaml_path, _ = QFileDialog.getSaveFileName(
+            self, "Save the CCD plugin configuration to a YAML file", "", "YAML Files (*.yaml);;All Files (*)"
+        )
+        if yaml_path == "":
+            return
+
+        if yaml_path:
+            if not yaml_path.endswith(".yaml"):
+                yaml_path += ".yaml"
+
+        with open(yaml_path, "w") as stream:
+            try:
+                yaml.dump(config, stream, default_flow_style=False)
+            except yaml.YAMLError as err:
+                raise Exception(f"Error writing the YAML file to save the CCD plugin, see more:|{err}")
+
+    def show_ang_go_to_the_coordinates(self):
+        if PickerCoordsOnMap.marker_drawn["canvas"] is not None:
+            canvas = PickerCoordsOnMap.marker_drawn["canvas"]
+        else:
+            canvas = self.canvas[0]
+        # get the coordinates
+        point = QgsPointXY(self.longitude.value(), self.latitude.value())
+        # transform coordinates to map canvas
+        crsSrc = QgsCoordinateReferenceSystem(4326)
+        crsDest = canvas.mapSettings().destinationCrs()
+        xform = QgsCoordinateTransform(crsSrc, crsDest, QgsProject.instance())
+        point = xform.transform(point)
+        # create a marker
+        PickerCoordsOnMap(self, canvas).create_marker(point)
+        canvas.setCenter(point)
+        canvas.refresh()
+
+    def clean_plot(self):
+        if self.html_file and os.path.exists(self.html_file):
+            os.remove(self.html_file)
+        self.plot_webview.setHtml("")
+        self.html_file = None
+
+    def open_plot_in_web_browser(self):
+        if self.html_file and os.path.exists(self.html_file):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.html_file))
+
+    @error_handler
+    def open_dashboard(self):
+        """Composite thumbnail (this dataset's median composite around the point) + the
+        already-generated CCDC chart, combined into one HTML file opened in the browser."""
+        if not self.html_file or not os.path.exists(self.html_file):
+            raise Exception(
+                "Run Generate first|Click Generate at least once for this point before building the dashboard."
+            )
+
+        config = get_plugin_config(self.id)
+        if not config:
+            return
+
+        try:
+            import ee
+
+            ee.Initialize(project=self._get_ee_project())
+        except Exception as err:
+            raise Exception(f"Error importing ee lib, check the installation or your internet connection|{err}")
+
+        self.btm_dashboard.setEnabled(False)
+        self.MsgBar.clearWidgets()
+        self.MsgBar.pushMessage("CCD-Plugin", "Building dashboard...", level=Qgis.MessageLevel.Info, duration=5)
+
+        globals()["dashboard_task"] = QgsTask.fromFunction(
+            "Build Dashboard", self.compute_dashboard, on_finished=self.dashboard_completed,
+            config=config, ccdc_html_file=self.html_file,
+        )
+        QgsApplication.taskManager().addTask(globals()["dashboard_task"])
+
+    @staticmethod
+    def compute_dashboard(task, config, ccdc_html_file):
+        from CCD_Plugin.core.dashboard import get_composite_tile_url
+
+        tile_url = get_composite_tile_url(
+            coords=(config["lon"], config["lat"]),
+            date_range=(config["start_date"], config["end_date"]),
+            doy_range=(config["start_doy"], config["end_doy"]),
+            dataset=config["dataset"],
+        )
+        return config, tile_url, ccdc_html_file
+
+    def dashboard_completed(self, exception, result=None):
+        self.btm_dashboard.setEnabled(True)
+
+        if exception is None and result is not None:
+            config, tile_url, ccdc_html_file = result
+
+            if not os.path.exists(ccdc_html_file):
+                # Generate ran again while this task was building - clean_plot() already
+                # removed the chart file this dashboard would have embedded.
+                self.MsgBar.clearWidgets()
+                self.MsgBar.pushMessage(
+                    "CCD-Plugin", "The chart changed while building the dashboard, please try Dashboard again.",
+                    level=Qgis.MessageLevel.Warning, duration=10,
+                )
+                return
+
+            from CCD_Plugin.CCD_Plugin import CCD_Plugin
+            from CCD_Plugin.core.dashboard import build_dashboard_html
+
+            dashboard_file = build_dashboard_html(CCD_Plugin.inst[self.id].tmp_dir, tile_url, ccdc_html_file, config)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(dashboard_file))
+        else:
+            self.MsgBar.clearWidgets()
+            self.MsgBar.pushMessage(
+                "CCD-Plugin", f"Error building dashboard: {exception}",
+                level=Qgis.MessageLevel.Warning, duration=10,
+            )
+
+    @error_handler
+    def open_gee_app(self):
+        """Open the user's own published Earth Engine App (gee_app/ccd_dashboard_app.js)
+        with the current point encoded as a #geoJson= URL fragment - no ee.Initialize() or
+        QgsTask needed here, the app does its own GEE computation once it loads."""
+        import json
+        import urllib.parse
+
+        app_url = self._get_gee_app_url()
+        lat, lon = self.latitude.value(), self.longitude.value()
+        d = GEE_APP_POINT_BUFFER_DEG
+        geojson = {
+            "type": "Polygon",
+            "coordinates": [[
+                [lon - d, lat - d], [lon - d, lat + d], [lon + d, lat + d], [lon + d, lat - d], [lon - d, lat - d],
+            ]],
+        }
+        full_url = f"{app_url}#geoJson={urllib.parse.quote(json.dumps(geojson))}"
+        if not QDesktopServices.openUrl(QUrl(full_url)):
+            raise Exception(f"Could not open URL|{full_url}")
+
+
+class PickerCoordsOnMap(QgsMapTool):
+    marker_drawn: ClassVar[dict] = {"marker": None, "canvas": None}
+
+    def __init__(self, widget, canvas=None):
+        self.widget = widget
+        self.canvas = canvas if canvas is not None else iface.mapCanvas()
+        super().__init__(self.canvas)
+        self.canvas.setFocus()
+
+    @staticmethod
+    def delete_markers():
+        if PickerCoordsOnMap.marker_drawn["marker"] is not None:
+            PickerCoordsOnMap.marker_drawn["canvas"].scene().removeItem(PickerCoordsOnMap.marker_drawn["marker"])
+        PickerCoordsOnMap.marker_drawn = {"marker": None, "canvas": None}
+
+    def create_marker(self, point):
+        # remove the previous marker
+        self.delete_markers()
+        # create a marker
+        marker = QgsVertexMarker(self.canvas)
+        marker.setCenter(point)
+        marker.setColor(QColor("red"))
+        marker.setIconSize(30)
+        marker.setIconType(QgsVertexMarker.IconType.ICON_CROSS)
+        marker.setPenWidth(3)
+        PickerCoordsOnMap.marker_drawn["marker"] = marker
+        PickerCoordsOnMap.marker_drawn["canvas"] = self.canvas
+
+    def canvasPressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos().x(), event.pos().y())
+            self.create_marker(point)
+            # transform coordinates to WGS84
+            crsSrc = self.canvas.mapSettings().destinationCrs()
+            crsDest = QgsCoordinateReferenceSystem(4326)
+            xform = QgsCoordinateTransform(crsSrc, crsDest, QgsProject.instance())
+            point = xform.transform(point)
+
+            self.widget.longitude.setValue(point.x())
+            self.widget.latitude.setValue(point.y())
+
+            if self.widget.auto_generate_plot.isChecked():
+                self.widget.new_plot()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.widget.pick_on_map.click()
