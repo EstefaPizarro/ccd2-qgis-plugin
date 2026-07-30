@@ -192,9 +192,11 @@ class CCD_PluginDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
         # multi-sensor/year-slider dashboard the app computes itself in the browser.
         self.btm_gee_app = QtWidgets.QToolButton()
         self.btm_gee_app.setText("GEE App")
-        self.btm_gee_app.setToolTip("Open your published Earth Engine App with this point")
+        self.btm_gee_app.setToolTip("Open your published Earth Engine App with this point\n(right-click to change the saved URL)")
         dashboard_layout.insertWidget(dashboard_layout.indexOf(self.btm_open_web_browser), self.btm_gee_app)
         self.btm_gee_app.clicked.connect(lambda: self.open_gee_app())
+        self.btm_gee_app.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.btm_gee_app.customContextMenuRequested.connect(lambda pos: self.change_gee_app_url())
 
         # enable/disable days of year when start day or end day is changed
         self.start_date.dateChanged.connect(lambda: self.enable_disable_days_of_year())
@@ -240,25 +242,42 @@ class CCD_PluginDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
             settings.setValue(key, project)
         return project
 
+    GEE_APP_URL_KEY = "CCD_Plugin/gee_app_url"
+
     def _get_gee_app_url(self):
         """Ask once per user for their published Earth Engine App URL (see gee_app/
         ccd_dashboard_app.js for the script to publish) and remember it via QgsSettings,
-        same pattern as _get_ee_project()."""
+        same pattern as _get_ee_project(). Right-click the GEE App button to change it later
+        without having to clear settings by hand."""
         settings = QgsSettings()
-        key = "CCD_Plugin/gee_app_url"
-        url = (settings.value(key, "", type=str) or "").strip()
+        url = (settings.value(self.GEE_APP_URL_KEY, "", type=str) or "").strip()
         if not url:
-            url, ok = QtWidgets.QInputDialog.getText(
-                self, "Earth Engine App",
-                "Paste your published Earth Engine App URL\n"
-                "(paste gee_app/ccd_dashboard_app.js into code.earthengine.google.com, "
-                "then Apps > Publish new App):",
-            )
-            url = url.strip()
-            if not ok or not url:
-                raise Exception("Earth Engine App URL required|Publish your app first, then paste its URL here.")
-            settings.setValue(key, url)
+            url = self._prompt_gee_app_url()
         return url
+
+    def _prompt_gee_app_url(self, current=""):
+        settings = QgsSettings()
+        url, ok = QtWidgets.QInputDialog.getText(
+            self, "Earth Engine App",
+            "Paste your published Earth Engine App URL\n"
+            "(paste gee_app/ccd_dashboard_app.js into code.earthengine.google.com, "
+            "then Apps > Publish new App):",
+            text=current,
+        )
+        url = url.strip()
+        if not ok or not url:
+            raise Exception("Earth Engine App URL required|Publish your app first, then paste its URL here.")
+        settings.setValue(self.GEE_APP_URL_KEY, url)
+        return url
+
+    def change_gee_app_url(self):
+        """Right-click handler on the GEE App button: re-prompt for the URL (pre-filled with
+        the current one) so the user can switch apps without resetting plugin settings."""
+        current = (QgsSettings().value(self.GEE_APP_URL_KEY, "", type=str) or "").strip()
+        try:
+            self._prompt_gee_app_url(current)
+        except Exception:
+            pass  # user cancelled - keep the existing URL
 
     @error_handler
     def new_plot(self):
