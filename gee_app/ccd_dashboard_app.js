@@ -125,11 +125,17 @@ var l8Map = ui.Map();
 var s2StatusLabel = ui.Label('Sentinel-2 - loading...');
 var l8StatusLabel = ui.Label('Landsat 8 - loading...');
 
+// The point being analyzed by CCD, as a small red diamond marker - re-added on top of every
+// composite/single-image layer below (map.layers().reset() clears it each time a layer changes).
+var pointMarker = ee.FeatureCollection([ee.Feature(point)]).style({color: 'ff0000', pointSize: 8, pointShape: 'diamond', width: 2});
+function markPoint(map) { map.addLayer(pointMarker, {}, 'CCD point'); }
+
 // Generic: build+show a calendar-year composite for one sensor/map/slider.
 function updateSensorYear(map, statusLabel, sensorLabel, collectionFn, year) {
   var composite = collectionFn(year + '-01-01', (year + 1) + '-01-01').median();
   map.layers().reset();
   map.addLayer(composite, rgbVisParams, sensorLabel + ' ' + year);
+  markPoint(map);
   statusLabel.setValue(sensorLabel + ' - composite ' + year);
 }
 
@@ -142,6 +148,7 @@ function updateSensorDefault(map, statusLabel, sensorLabel, collectionFn, days) 
   var composite = collectionFn(start, end).median();
   map.layers().reset();
   map.addLayer(composite, rgbVisParams, sensorLabel + ' (recent)');
+  markPoint(map);
   statusLabel.setValue(sensorLabel + ' - composite (last ' + days + ' days)');
 }
 
@@ -159,13 +166,29 @@ updateSensorDefault(l8Map, l8StatusLabel, 'Landsat 8', landsat8Collection, 365);
 // matching map above.
 // ---------------------------------------------------------------------------
 
-var s2Chart = ui.Chart.image.series(s2Full.select('NDVI'), point, ee.Reducer.mean(), 10)
-  .setOptions({title: 'Sentinel-2 NDVI (click a point to load that image)',
-    vAxis: {viewWindow: {min: -1, max: 1}}, pointSize: 2, lineWidth: 1});
+// No fixed vAxis viewWindow - a hardcoded -1..1 range squashed the actual NDVI values into a
+// thin band since real NDVI at a point rarely spans the full theoretical range. Leaving
+// viewWindow unset lets Google Charts auto-scale to the plotted data for each sensor.
+//
+// explorer: native Google Charts option (ui.Chart passes setOptions straight through to it,
+// no custom code needed) - drag on the chart to zoom into a date range AND a value range
+// (axis: 'both' - not just horizontal), right-click to reset. Shared by both charts, so the
+// vAxis is freely draggable/zoomable for Landsat too, not just auto-ranged at load.
+var CHART_EXPLORER = {axis: 'both', keepInBounds: true, actions: ['dragToZoom', 'rightClickToReset']};
 
-var l8Chart = ui.Chart.image.series(l8Full.select('NDVI'), point, ee.Reducer.mean(), 30)
-  .setOptions({title: 'Landsat 8 NDVI (click a point to load that image)',
-    vAxis: {viewWindow: {min: -1, max: 1}}, pointSize: 2, lineWidth: 1});
+// Kept as named objects (not inlined into .setOptions) so the "Reset zoom" buttons below can
+// re-apply the exact original options - that's how you undo an explorer zoom/pan
+// programmatically, there's no separate "reset" call on the chart itself.
+var s2ChartOptions = {title: 'Sentinel-2 NDVI (drag to zoom, right-click to reset - click a point to load that image)',
+  pointSize: 2, lineWidth: 1, explorer: CHART_EXPLORER};
+var l8ChartOptions = {title: 'Landsat 8 NDVI (drag to zoom, right-click to reset - click a point to load that image)',
+  pointSize: 2, lineWidth: 1, explorer: CHART_EXPLORER};
+
+var s2Chart = ui.Chart.image.series(s2Full.select('NDVI'), point, ee.Reducer.mean(), 10).setOptions(s2ChartOptions);
+var l8Chart = ui.Chart.image.series(l8Full.select('NDVI'), point, ee.Reducer.mean(), 30).setOptions(l8ChartOptions);
+
+var s2ResetZoomBtn = ui.Button({label: 'Reset zoom', onClick: function () { s2Chart.setOptions(s2ChartOptions); }});
+var l8ResetZoomBtn = ui.Button({label: 'Reset zoom', onClick: function () { l8Chart.setOptions(l8ChartOptions); }});
 
 // xValue can arrive as either a raw ms-since-epoch number or a formatted date string
 // (Highcharts-style, e.g. "Aug 14, 2023") depending on the chart's x-axis config -
@@ -189,6 +212,7 @@ function showSingleImage(map, statusLabel, sensorLabel, collection, xValue) {
   var dateStr = parsedDate.jsDate.toISOString().slice(0, 10);
   map.layers().reset();
   map.addLayer(img.select('NDVI'), ndviVisParams, sensorLabel + ' NDVI ' + dateStr);
+  markPoint(map);
   statusLabel.setValue(sensorLabel + ' - single image ' + dateStr + ' (NDVI)');
 }
 
@@ -211,12 +235,16 @@ var title = ui.Label({
 function sensorPanel(statusLabel, slider, map) {
   return ui.Panel([statusLabel, slider, map], ui.Panel.Layout.Flow('vertical'), {stretch: 'both', width: '50%'});
 }
-s2Chart.style().set('width', '50%');
-l8Chart.style().set('width', '50%');
+// Chart + its reset-zoom button, stacked - the width: '50%' moves to this wrapping panel
+// (the chart itself just stretches to fill it) so the button lines up above the chart.
+function chartPanel(resetBtn, chart) {
+  chart.style().set('stretch', 'horizontal');
+  return ui.Panel([resetBtn, chart], ui.Panel.Layout.Flow('vertical'), {stretch: 'both', width: '50%'});
+}
 
-var s2Row = ui.Panel([sensorPanel(s2StatusLabel, s2Slider, s2Map), s2Chart],
+var s2Row = ui.Panel([sensorPanel(s2StatusLabel, s2Slider, s2Map), chartPanel(s2ResetZoomBtn, s2Chart)],
   ui.Panel.Layout.Flow('horizontal'), {stretch: 'both'});
-var l8Row = ui.Panel([sensorPanel(l8StatusLabel, l8Slider, l8Map), l8Chart],
+var l8Row = ui.Panel([sensorPanel(l8StatusLabel, l8Slider, l8Map), chartPanel(l8ResetZoomBtn, l8Chart)],
   ui.Panel.Layout.Flow('horizontal'), {stretch: 'both'});
 
 var body = ui.Panel([s2Row, l8Row], ui.Panel.Layout.Flow('vertical'), {stretch: 'both'});

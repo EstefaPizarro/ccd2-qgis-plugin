@@ -45,7 +45,7 @@ from qgis.utils import iface
 plugin_folder = os.path.dirname(os.path.dirname(__file__))
 
 # ~0.001 degrees (~100 m) - small square sent as #geoJson= to the user's published
-# Earth Engine App (open_gee_app), same spirit as core/dashboard.py's buffer.
+# Earth Engine App (open_gee_app).
 GEE_APP_POINT_BUFFER_DEG = 0.001
 
 # Try QWebEngine first (Qt6 / QGIS 4.x, and Qt5 with WebEngine), then fall back to QtWebKit (Qt5 / QGIS 3.x)
@@ -175,17 +175,7 @@ class CCD_PluginDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
         self.html_file = None
         self.btm_open_web_browser.clicked.connect(self.open_plot_in_web_browser)
 
-        # Dashboard: composite thumbnail + existing CCDC chart, opened in the system browser.
-        # Created at runtime (not in the .ui) - avoids duplicating it across the two near-
-        # identical .ui variants (QWebEngine/QWebView).
-        self.btm_dashboard = QtWidgets.QToolButton()
-        self.btm_dashboard.setText("Dashboard")
-        self.btm_dashboard.setToolTip("Build a composite + CCDC chart dashboard and open it in the web browser")
-        self.btm_dashboard.setIcon(QIcon(":/plugins/CCD_Plugin/icons/open_in_web_browser.svg"))
-        self.btm_dashboard.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         dashboard_layout = self.widget_5.layout()
-        dashboard_layout.insertWidget(dashboard_layout.indexOf(self.btm_open_web_browser), self.btm_dashboard)
-        self.btm_dashboard.clicked.connect(lambda: self.open_dashboard())
 
         # GEE App: opens the user's own published Earth Engine App (see gee_app/
         # ccd_dashboard_app.js) with the current point, for a fully interactive
@@ -470,76 +460,6 @@ class CCD_PluginDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
     def open_plot_in_web_browser(self):
         if self.html_file and os.path.exists(self.html_file):
             QDesktopServices.openUrl(QUrl.fromLocalFile(self.html_file))
-
-    @error_handler
-    def open_dashboard(self):
-        """Composite thumbnail (this dataset's median composite around the point) + the
-        already-generated CCDC chart, combined into one HTML file opened in the browser."""
-        if not self.html_file or not os.path.exists(self.html_file):
-            raise Exception(
-                "Run Generate first|Click Generate at least once for this point before building the dashboard."
-            )
-
-        config = get_plugin_config(self.id)
-        if not config:
-            return
-
-        try:
-            import ee
-
-            ee.Initialize(project=self._get_ee_project())
-        except Exception as err:
-            raise Exception(f"Error importing ee lib, check the installation or your internet connection|{err}")
-
-        self.btm_dashboard.setEnabled(False)
-        self.MsgBar.clearWidgets()
-        self.MsgBar.pushMessage("CCD-Plugin", "Building dashboard...", level=Qgis.MessageLevel.Info, duration=5)
-
-        globals()["dashboard_task"] = QgsTask.fromFunction(
-            "Build Dashboard", self.compute_dashboard, on_finished=self.dashboard_completed,
-            config=config, ccdc_html_file=self.html_file,
-        )
-        QgsApplication.taskManager().addTask(globals()["dashboard_task"])
-
-    @staticmethod
-    def compute_dashboard(task, config, ccdc_html_file):
-        from CCD_Plugin.core.dashboard import get_composite_tile_url
-
-        tile_url = get_composite_tile_url(
-            coords=(config["lon"], config["lat"]),
-            date_range=(config["start_date"], config["end_date"]),
-            doy_range=(config["start_doy"], config["end_doy"]),
-            dataset=config["dataset"],
-        )
-        return config, tile_url, ccdc_html_file
-
-    def dashboard_completed(self, exception, result=None):
-        self.btm_dashboard.setEnabled(True)
-
-        if exception is None and result is not None:
-            config, tile_url, ccdc_html_file = result
-
-            if not os.path.exists(ccdc_html_file):
-                # Generate ran again while this task was building - clean_plot() already
-                # removed the chart file this dashboard would have embedded.
-                self.MsgBar.clearWidgets()
-                self.MsgBar.pushMessage(
-                    "CCD-Plugin", "The chart changed while building the dashboard, please try Dashboard again.",
-                    level=Qgis.MessageLevel.Warning, duration=10,
-                )
-                return
-
-            from CCD_Plugin.CCD_Plugin import CCD_Plugin
-            from CCD_Plugin.core.dashboard import build_dashboard_html
-
-            dashboard_file = build_dashboard_html(CCD_Plugin.inst[self.id].tmp_dir, tile_url, ccdc_html_file, config)
-            QDesktopServices.openUrl(QUrl.fromLocalFile(dashboard_file))
-        else:
-            self.MsgBar.clearWidgets()
-            self.MsgBar.pushMessage(
-                "CCD-Plugin", f"Error building dashboard: {exception}",
-                level=Qgis.MessageLevel.Warning, duration=10,
-            )
 
     @error_handler
     def open_gee_app(self):

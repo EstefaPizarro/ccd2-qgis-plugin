@@ -1,10 +1,10 @@
 # CCD 2.0
 
 Straight port of [CCD-Plugin](https://github.com/SMByC/CCD-Plugin) (CCDC point-based change
-detection), rebranded (name + toolbar icon only, no functional changes). `CCD_Plugin/` is
-otherwise an unmodified copy of the original source - only the fixes below were applied to
-make it run. Everything else (CEO composites/dashboard/field-validation fusion) was reset;
-ask for those as separate improvements when wanted.
+detection), rebranded (name + toolbar icon). `CCD_Plugin/` is otherwise an unmodified copy of
+the original source - only the fixes below plus one added button ("GEE App", see Usage) were
+applied. Everything else (CEO composites/dashboard/field-validation fusion) was reset; ask for
+those as separate improvements when wanted.
 
 ## Fixes applied on top of the original
 
@@ -35,19 +35,16 @@ Matches the original CCD-Plugin exactly: toolbar/menu icon opens the dock (not a
 "Pick on Map" then click the canvas, "Generate" runs CCDC and plots the fitted curve embedded
 in the dock panel, "Open in browser" opens the same plot externally.
 
-Two extra buttons, both open in your system browser (the embedded `QWebEngineView` panel is
+One extra button, which opens in your system browser (the embedded `QWebEngineView` panel is
 known-broken on some Windows/Chromium setups - unrelated to this plugin's code):
 
-- **Dashboard**: a composite (median, pan/zoom Leaflet map of live GEE tiles) for the
-  currently-selected dataset around the point, combined with the CCDC chart you already
-  generated, into one local HTML page. No setup needed, works right after "Generate".
 - **GEE App**: opens *your own* published Earth Engine App with the current point, for a
   fully interactive dashboard - composites on the left (Sentinel-2 and Landsat 8, both
   2015-present, each with its own year slider), NDVI time-series charts on the right -
   click a point on a chart to load that exact date's image (as NDVI) on the matching
   panel. Earth Engine computes everything itself in the browser - see "Publish your Earth
   Engine App" below. First click asks for your app's URL and remembers it (`QgsSettings`,
-  per QGIS profile).
+  per QGIS profile); right-click the button to change the saved URL later.
 
 ### Publish your Earth Engine App (one-time, per user)
 
