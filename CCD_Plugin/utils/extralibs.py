@@ -41,9 +41,11 @@ from qgis.PyQt.QtWidgets import (
 
 
 def _get_plugin_version() -> str:
-    """Read the plugin version from ``metadata.txt``"""
+    """Read the plugin version from the outer plugin root's ``metadata.txt`` - CCD_Plugin/
+    no longer ships its own copy (having both made QGIS's plugin scanner double-discover
+    CCD_Plugin/ as a second, broken plugin)."""
     metadata_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "metadata.txt",
     )
     config = configparser.ConfigParser()
@@ -51,6 +53,11 @@ def _get_plugin_version() -> str:
     return config["general"]["version"]
 
 
+# ponytail: still points at the upstream SMByC repo's releases, tagged with *our* version
+# (0.1.0) - there's no such release there, so this 404s if it's ever actually fetched. Only
+# reached when `import plotly` fails despite `pip install -r requirements.txt` (see README),
+# so it's a fallback for a case that shouldn't happen if that step was followed. Host our own
+# extlibs.zip release (or drop this fallback) if that assumption stops holding.
 EXTLIBS_DOWNLOAD_URL = f"https://github.com/SMByC/CCD-Plugin/releases/download/{_get_plugin_version()}/extlibs.zip"
 
 
