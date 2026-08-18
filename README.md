@@ -14,10 +14,13 @@ added button listed below. Original and this project are both licensed under the
 
 ## What's new vs. the original
 
-- **"GEE App" button** - opens your own published Earth Engine App dashboard for the current
-  point (composites + time-series charts, computed entirely in the browser). See Usage below.
-- **`gee_app/*.js`** - the two standalone Earth Engine scripts behind that dashboard, which
-  you publish yourself (one-time, see "Publish your Earth Engine App" below).
+- **"GEE App" button** - opens an interactive Earth Engine App dashboard for the current point
+  (composites + time-series charts, computed entirely in the browser). Works out of the box
+  against the maintainer's own published app; right-click to point it at a different one
+  instead. See Usage below.
+- **`gee_app/*.js`** - the two standalone Earth Engine scripts behind that dashboard, in case
+  you want to publish your own (e.g. if the shared one gets slow under load - see "Publish
+  your own Earth Engine App" below).
 - Everything else (CEO composites/dashboard/field-validation fusion) was reset; ask for those
   as separate improvements when wanted.
 
@@ -55,16 +58,18 @@ in the dock panel, "Open in browser" opens the same plot externally.
 One extra button, which opens in your system browser (the embedded `QWebEngineView` panel is
 known-broken on some Windows/Chromium setups - unrelated to this plugin's code):
 
-- **GEE App**: opens *your own* published Earth Engine App with the current point, for a
-  fully interactive dashboard - composites on the left (Sentinel-2 and Landsat 8, both
+- **GEE App**: opens a published Earth Engine App with the current point, for a fully
+  interactive dashboard - composites on the left (Sentinel-2 and Landsat 8, both
   2015-present, each with its own year slider), NDVI time-series charts on the right -
   click a point on a chart to load that exact date's image (as NDVI) on the matching
-  panel. Earth Engine computes everything itself in the browser - see "Publish your Earth
-  Engine App" below. First click asks for your app's URL and remembers it (`QgsSettings`,
-  per QGIS profile); right-click the button to change the saved URL later.
+  panel. Earth Engine computes everything itself in the browser, under the app publisher's
+  quota - no setup needed, it just works. Right-click the button to switch to a different
+  published app (yours or anyone else's) - saved via `QgsSettings`, per QGIS profile.
 
-### Publish your Earth Engine App (one-time, per user)
+### Publish your own Earth Engine App (optional)
 
+Only needed if you want your own copy - e.g. the shared default app gets slow if a lot of
+people are using it at once, since everyone's browser hits the same publisher quota.
 `gee_app/ccd_dashboard_app.js` is a standalone script (not run by Python/QGIS) that becomes
 your own permanent, shareable dashboard link:
 

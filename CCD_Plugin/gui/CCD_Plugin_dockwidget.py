@@ -48,6 +48,12 @@ plugin_folder = os.path.dirname(os.path.dirname(__file__))
 # Earth Engine App (open_gee_app).
 GEE_APP_POINT_BUFFER_DEG = 0.001
 
+# Default "GEE App" URL - the maintainer's own published app, works out of the box for
+# anyone installing the plugin (EE Apps are public pages, viewers don't need their own GEE
+# account or project). Right-click the button to point it at a different app instead - useful
+# if this one gets slow under shared load, since all visitors share the publisher's quota.
+DEFAULT_GEE_APP_URL = "https://epizarro04.users.earthengine.app/view/prueba10"
+
 # Try QWebEngine first (Qt6 / QGIS 4.x, and Qt5 with WebEngine), then fall back to QtWebKit (Qt5 / QGIS 3.x)
 HAS_WEBENGINE = False
 HAS_WEBKIT = False
@@ -235,39 +241,31 @@ class CCD_PluginDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
     GEE_APP_URL_KEY = "CCD_Plugin/gee_app_url"
 
     def _get_gee_app_url(self):
-        """Ask once per user for their published Earth Engine App URL (see gee_app/
-        ccd_dashboard_app.js for the script to publish) and remember it via QgsSettings,
-        same pattern as _get_ee_project(). Right-click the GEE App button to change it later
-        without having to clear settings by hand."""
+        """URL for the "GEE App" button: DEFAULT_GEE_APP_URL unless the user overrode it
+        (right-click) via QgsSettings, same storage pattern as _get_ee_project()."""
         settings = QgsSettings()
-        url = (settings.value(self.GEE_APP_URL_KEY, "", type=str) or "").strip()
-        if not url:
-            url = self._prompt_gee_app_url()
-        return url
+        return (settings.value(self.GEE_APP_URL_KEY, "", type=str) or "").strip() or DEFAULT_GEE_APP_URL
 
     def _prompt_gee_app_url(self, current=""):
         settings = QgsSettings()
         url, ok = QtWidgets.QInputDialog.getText(
             self, "Earth Engine App",
-            "Paste your published Earth Engine App URL\n"
+            "Paste an Earth Engine App URL to use instead of the default\n"
             "(paste gee_app/ccd_dashboard_app.js into code.earthengine.google.com, "
-            "then Apps > Publish new App):",
+            "then Apps > Publish new App to make your own):",
             text=current,
         )
         url = url.strip()
         if not ok or not url:
-            raise Exception("Earth Engine App URL required|Publish your app first, then paste its URL here.")
+            return None
         settings.setValue(self.GEE_APP_URL_KEY, url)
         return url
 
     def change_gee_app_url(self):
         """Right-click handler on the GEE App button: re-prompt for the URL (pre-filled with
-        the current one) so the user can switch apps without resetting plugin settings."""
-        current = (QgsSettings().value(self.GEE_APP_URL_KEY, "", type=str) or "").strip()
-        try:
-            self._prompt_gee_app_url(current)
-        except Exception:
-            pass  # user cancelled - keep the existing URL
+        the effective one, default or override) so the user can switch apps without resetting
+        plugin settings. Cancelling leaves the current URL untouched."""
+        self._prompt_gee_app_url(self._get_gee_app_url())
 
     @error_handler
     def new_plot(self):
@@ -463,9 +461,10 @@ class CCD_PluginDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
 
     @error_handler
     def open_gee_app(self):
-        """Open the user's own published Earth Engine App (gee_app/ccd_dashboard_app.js)
-        with the current point encoded as a #geoJson= URL fragment - no ee.Initialize() or
-        QgsTask needed here, the app does its own GEE computation once it loads."""
+        """Open the configured Earth Engine App (DEFAULT_GEE_APP_URL, or an override set via
+        right-click) with the current point encoded as a #geoJson= URL fragment - no
+        ee.Initialize() or QgsTask needed here, the app does its own GEE computation once it
+        loads."""
         import json
         import urllib.parse
 
