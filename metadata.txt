@@ -15,4 +15,4 @@ category=Plugins
 experimental=True
 deprecated=False
 tags=remote sensing,change detection,ccdc,google earth engine,time series
-icon=CCD_Plugin/icons/ccd_ceo_plugin_logo.svg
+icon=CCD_Plugin/icons/ccd_ceo_plugin_logo.png
