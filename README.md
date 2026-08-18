@@ -1,10 +1,25 @@
 # CCD 2.0
 
-Straight port of [CCD-Plugin](https://github.com/SMByC/CCD-Plugin) (CCDC point-based change
-detection), rebranded (name + toolbar icon). `CCD_Plugin/` is otherwise an unmodified copy of
-the original source - only the fixes below plus one added button ("GEE App", see Usage) were
-applied. Everything else (CEO composites/dashboard/field-validation fusion) was reset; ask for
-those as separate improvements when wanted.
+QGIS plugin: pick a point on the canvas, run Continuous Change Detection (CCDC) on it via
+Google Earth Engine, and plot the fitted harmonic curve - plus a button to open a full
+interactive GEE dashboard (composites + time-series charts) for that same point.
+
+## Credits & license
+
+`CCD_Plugin/` in this repo is an unmodified copy of
+[CCD-Plugin](https://github.com/SMByC/CCD-Plugin) by Xavier Corredor Llano
+(SMByC - Sistema de Monitoreo de Bosques y Carbono, IDEAM), except for the fixes and the one
+added button listed below. Original and this project are both licensed under the
+[GNU GPLv3](LICENSE).
+
+## What's new vs. the original
+
+- **"GEE App" button** - opens your own published Earth Engine App dashboard for the current
+  point (composites + time-series charts, computed entirely in the browser). See Usage below.
+- **`gee_app/*.js`** - the two standalone Earth Engine scripts behind that dashboard, which
+  you publish yourself (one-time, see "Publish your Earth Engine App" below).
+- Everything else (CEO composites/dashboard/field-validation fusion) was reset; ask for those
+  as separate improvements when wanted.
 
 ## Fixes applied on top of the original
 
@@ -21,13 +36,15 @@ those as separate improvements when wanted.
   remembers it via `QgsSettings` (per QGIS profile - works for any user, no env var needed).
   `EE_PROJECT` env var still overrides if set.
 
-## Install
+## Install from GitHub
 
-1. `pip install -r requirements.txt` into your QGIS Python environment.
-2. Run `earthengine authenticate` once (or set `EE_PRIVATE_KEY_JSON`/service-account
-   credentials - see CCD_Plugin's own docs). The project ID itself is asked for in-app.
-3. Zip this folder (`qgis-ccd-ceo-plugin/`) and install via
-   QGIS → Plugins → Manage and Install Plugins → Install from ZIP.
+1. On this repo's GitHub page, **Code → Download ZIP** (or `git clone` it).
+2. QGIS → *Plugins → Manage and Install Plugins → Install from ZIP* → pick the ZIP you just
+   downloaded (if you cloned instead, zip the repo folder first).
+3. `pip install -r requirements.txt` into your QGIS Python environment.
+4. Run `earthengine authenticate` once (or set `EE_PRIVATE_KEY_JSON`/service-account
+   credentials - see CCD_Plugin's own docs). The Earth Engine Cloud project ID itself is
+   asked for in-app, the first time you click "Generate".
 
 ## Usage
 

@@ -94,7 +94,7 @@ class CCD_Plugin:
         # Create action that will start plugin configuration
         # ponytail: user's own icon, loaded straight from disk (no pyrcc/resources.py
         # recompile needed) instead of the compiled :/plugins/CCD_Plugin/icons/ resource.
-        icon_path = os.path.join(self.plugin_dir, "icons", "icon_satellite_timeseries_32x32.jpg")
+        icon_path = os.path.join(self.plugin_dir, "icons", "ccd_ceo_plugin_logo.svg")
         self.dockable_action = QAction(QIcon(icon_path), "CCD 2.0", self.iface.mainWindow())
         # connect the action to the run method
         self.dockable_action.triggered.connect(self.run)
