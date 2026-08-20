@@ -24,7 +24,7 @@ import subprocess
 import sys
 
 try:
-    from qgis.core import Qgis, QgsApplication, QgsMessageLog
+    from qgis.core import Qgis, QgsMessageLog
     from qgis.PyQt.QtCore import Qt
     from qgis.PyQt.QtWidgets import (
         QApplication,
@@ -44,6 +44,26 @@ except ImportError:
 def _plugin_root() -> str:
     """Root folder of the plugin (three levels up: utils/ -> CCD_Plugin/ -> root)."""
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _find_python_exe() -> str:
+    """Locate the actual Python interpreter behind the running QGIS process.
+
+    ``sys.executable`` is unreliable here: on Windows it resolves to the QGIS host
+    binary (``qgis-bin.exe``), not a real Python interpreter, so `sys.executable -m
+    pip` fails with FileNotFoundError (https://github.com/qgis/QGIS/issues/45646).
+    ``sys.exec_prefix`` still points at the actual Python install dir regardless of
+    which executable launched the interpreter, so look for python(.exe) there first.
+    """
+    candidates = [
+        os.path.join(sys.exec_prefix, "python.exe"),  # Windows
+        os.path.join(sys.exec_prefix, "bin", "python3"),  # Linux/Mac bundled
+        sys.executable,  # fallback: correct on Linux/Mac, and better than nothing
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return sys.executable
 
 
 def _build_pip_command(python_exe: str, extlibs_dir: str, requirements_path: str) -> list[str]:
@@ -144,14 +164,17 @@ class PipInstall(QDialog):
 
 
 def get_extlibs_install_path() -> str:
-    """Return the ``extlibs`` directory inside this plugin."""
-    return os.path.join(
-        QgsApplication.qgisSettingsDirPath(),
-        "python",
-        "plugins",
-        "CCD_Plugin",
-        "extlibs",
-    )
+    """Return the ``extlibs`` directory inside this plugin.
+
+    Derived from this file's own location (not the QGIS profile dir + a hardcoded
+    "CCD_Plugin" folder name) so it matches wherever the plugin actually got
+    installed: "Install from ZIP" from a GitHub download names the top-level
+    folder after the repo/branch (e.g. "ccd2-qgis-plugin-main"), not "CCD_Plugin" -
+    that's only the name of the subfolder this file lives in, which is what
+    pre_init_plugin() (__init__.py) also searches relative to itself.
+    """
+    ccd_plugin_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(ccd_plugin_dir, "extlibs")
 
 
 def install() -> None:
@@ -161,7 +184,7 @@ def install() -> None:
     os.makedirs(extlibs_dir, exist_ok=True)
     requirements_path = os.path.join(_plugin_root(), "requirements.txt")
 
-    cmd = _build_pip_command(sys.executable, extlibs_dir, requirements_path)
+    cmd = _build_pip_command(_find_python_exe(), extlibs_dir, requirements_path)
     _log(f"Installing extra libs to: {extlibs_dir}")
     dialog = PipInstall(cmd)
 
@@ -185,7 +208,18 @@ def _self_check() -> None:
     assert cmd[cmd.index("--target") + 1] == "EXTLIBS_DIR"
     assert cmd[cmd.index("-r") + 1] == "REQS.txt"
     assert cmd[-2:] == ["-r", "REQS.txt"]
-    print("extralibs._build_pip_command: ok")
+
+    # extlibs dir must live inside the CCD_Plugin/ folder this file is under, matching
+    # where __init__.py's pre_init_plugin() looks - not some hardcoded/absolute guess.
+    extlibs_dir = get_extlibs_install_path()
+    assert os.path.basename(extlibs_dir) == "extlibs"
+    assert os.path.dirname(extlibs_dir) == os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # must resolve to a real file, never the bare "python" name pip could silently fail on
+    python_exe = _find_python_exe()
+    assert os.path.isfile(python_exe), f"resolved python_exe does not exist: {python_exe}"
+
+    print("extralibs self-check: ok")
 
 
 if __name__ == "__main__":
