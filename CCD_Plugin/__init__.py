@@ -30,7 +30,10 @@ from CCD_Plugin.utils import extralibs
 def check_dependencies() -> bool:
     """Return True if all required extra libraries are importable."""
     try:
+        import ee  # noqa: F401
+        import numpy  # noqa: F401
         import plotly  # noqa: F401
+        import yaml  # noqa: F401
 
         return True
     except ImportError:

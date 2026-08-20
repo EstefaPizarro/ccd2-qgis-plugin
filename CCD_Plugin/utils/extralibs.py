@@ -1,7 +1,7 @@
 """
 /***************************************************************************
  CCD Plugin
-                                 A QGIS plugin
+                                A QGIS plugin
  Continuous Change Detection Plugin
                               -------------------
         copyright            : (C) 2019-2026 by Xavier Corredor Llano, SMByC
@@ -18,47 +18,40 @@
  ***************************************************************************/
 """
 
-import configparser
 import os
 import shutil
-import ssl
-import tempfile
-import urllib.request
-import zipfile
+import subprocess
+import sys
 
-from qgis.core import Qgis, QgsApplication, QgsMessageLog
-from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import (
-    QApplication,
-    QDialog,
-    QHBoxLayout,
-    QLabel,
-    QMessageBox,
-    QProgressBar,
-    QPushButton,
-    QVBoxLayout,
-)
-
-
-def _get_plugin_version() -> str:
-    """Read the plugin version from the outer plugin root's ``metadata.txt`` - CCD_Plugin/
-    no longer ships its own copy (having both made QGIS's plugin scanner double-discover
-    CCD_Plugin/ as a second, broken plugin)."""
-    metadata_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "metadata.txt",
+try:
+    from qgis.core import Qgis, QgsApplication, QgsMessageLog
+    from qgis.PyQt.QtCore import Qt
+    from qgis.PyQt.QtWidgets import (
+        QApplication,
+        QDialog,
+        QHBoxLayout,
+        QLabel,
+        QMessageBox,
+        QProgressBar,
+        QPushButton,
+        QVBoxLayout,
     )
-    config = configparser.ConfigParser()
-    config.read(metadata_path, encoding="utf-8")
-    return config["general"]["version"]
+except ImportError:
+    # Only hit outside a running QGIS, to run this file's self-check (see __main__ below).
+    QDialog = object
 
 
-# ponytail: still points at the upstream SMByC repo's releases, tagged with *our* version
-# (0.1.0) - there's no such release there, so this 404s if it's ever actually fetched. Only
-# reached when `import plotly` fails despite `pip install -r requirements.txt` (see README),
-# so it's a fallback for a case that shouldn't happen if that step was followed. Host our own
-# extlibs.zip release (or drop this fallback) if that assumption stops holding.
-EXTLIBS_DOWNLOAD_URL = f"https://github.com/SMByC/CCD-Plugin/releases/download/{_get_plugin_version()}/extlibs.zip"
+def _plugin_root() -> str:
+    """Root folder of the plugin (three levels up: utils/ -> CCD_Plugin/ -> root)."""
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _build_pip_command(python_exe: str, extlibs_dir: str, requirements_path: str) -> list[str]:
+    """Build the `pip install` argv that installs requirements_path's packages into extlibs_dir."""
+    return [
+        python_exe, "-m", "pip", "install", "--upgrade",
+        "--target", extlibs_dir, "-r", requirements_path,
+    ]
 
 
 def _log(msg: str, level: str = "Info") -> None:
@@ -70,10 +63,10 @@ def _log(msg: str, level: str = "Info") -> None:
         print(f"[CCD-Plugin] {msg}")
 
 
-class DownloadAndUnzip(QDialog):
-    """Modal dialog that downloads a ZIP from *url* and extracts it to *output_path*"""
+class PipInstall(QDialog):
+    """Modal dialog that runs `pip install` and streams its output live."""
 
-    def __init__(self, url: str, output_path: str, parent=None):
+    def __init__(self, cmd: list[str], parent=None):
         super().__init__(parent)
         self.setWindowTitle("CCD-Plugin Installation")
         self.setModal(True)
@@ -81,19 +74,17 @@ class DownloadAndUnzip(QDialog):
         # Keep dialog on top of the QGIS main window
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
 
-        self.url = url
-        self.output_path = output_path
-        self._zip_fd: int | None = None
-        self._zip_path: str | None = None
+        self.cmd = cmd
         self._cancelled = False
+        self._proc: subprocess.Popen | None = None
+        self.returncode: int | None = None
 
-        self.progress_label = QLabel("Downloading additional libraries...", self)
+        self.progress_label = QLabel("Installing required Python packages...", self)
         self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
+        self.progress_bar.setRange(0, 0)  # indeterminate - pip doesn't report overall progress
 
         progress_layout = QVBoxLayout()
         progress_layout.addWidget(self.progress_label)
@@ -109,118 +100,47 @@ class DownloadAndUnzip(QDialog):
         main_layout = QVBoxLayout(self)
         main_layout.addLayout(progress_layout)
         main_layout.addLayout(button_layout)
-        # Size the dialog to fit its content
         self.adjustSize()
 
         self.show()
         QApplication.processEvents()
 
-        self._zip_fd, self._zip_path = tempfile.mkstemp(suffix=".zip")
+        self.returncode = self._run()
 
-        downloaded_ok = self.download_file()
-        extracted_ok = (not self._cancelled) and downloaded_ok and self.extract_zip()
-
-        if extracted_ok:
+        if self.returncode == 0:
             self.progress_label.setText("Done!")
+            self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(100)
         elif not self._cancelled:
-            _log("Failed to download/extract extra libraries.", level="Critical")
-            QMessageBox.critical(
-                None,
-                "CCD-Plugin: Error installing libs",
-                (
-                    "Error downloading and extracting additional Python packages"
-                    " required for CCD-Plugin.\n\n"
-                    "Read the install instructions here:\n"
-                    "https://github.com/SMByC/CCD-Plugin#installation"
-                ),
-                QMessageBox.StandardButton.Ok,
-            )
+            _log("pip install failed, see log above.", level="Critical")
 
-        self._cleanup()
+        self.deleteLater()
+        self.accept()
 
     def _on_cancel(self) -> None:
         self._cancelled = True
-        self._cleanup()
+        if self._proc is not None:
+            self._proc.terminate()
 
-    def _cleanup(self) -> None:
-        """Release the temporary ZIP file and close the dialog."""
-        if self._zip_fd is not None:
-            try:
-                os.close(self._zip_fd)
-            except OSError:
-                pass
-            self._zip_fd = None
-
-        if self._zip_path and os.path.exists(self._zip_path):
-            try:
-                os.remove(self._zip_path)
-            except OSError:
-                pass
-            self._zip_path = None
-
+    def _run(self) -> int:
+        """Run self.cmd, pumping its output into the QGIS log and the Qt event loop
+        so the dialog stays responsive. Returns the process return code (-1 if cancelled)."""
         try:
-            self.deleteLater()
-            self.accept()
-        except RuntimeError:
-            pass
-
-    def download_file(self) -> bool:
-        """Download ``self.url`` into the temporary ZIP file.
-
-        Returns ``True`` on success, ``False`` on error or cancellation.
-        """
-        if self._zip_path is None:
-            return False
-        try:
-            req = urllib.request.Request(self.url, headers={"User-Agent": "CCD-Plugin"})
-            with urllib.request.urlopen(req, timeout=60, context=ssl.create_default_context()) as response:  # nosec B310
-                raw_length = response.getheader("Content-Length")
-                total_length: int | None = int(raw_length) if raw_length else None
-                # Indeterminate progress when length is unknown
-                self.progress_bar.setRange(0, 100 if total_length else 0)
-
-                with open(self._zip_path, "wb") as fh:
-                    downloaded = 0
-                    while not self._cancelled:
-                        chunk = response.read(8192)
-                        if not chunk:
-                            break
-                        fh.write(chunk)
-                        downloaded += len(chunk)
-                        if total_length:
-                            self.progress_bar.setValue(int(downloaded * 100 / total_length))
-                        QApplication.processEvents()
-
-            self.progress_bar.setRange(0, 100)
-            return not self._cancelled
+            self._proc = subprocess.Popen(  # nosec B603
+                self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            )
         except Exception as exc:
-            _log(f"Download error: {exc}", level="Critical")
-            return False
+            _log(f"Failed to start pip: {exc}", level="Critical")
+            return -1
 
-    def extract_zip(self) -> bool:
-        """Extract the downloaded ZIP to ``self.output_path``.
+        for line in self._proc.stdout:  # type: ignore[union-attr]
+            _log(line.rstrip())
+            QApplication.processEvents()
+            if self._cancelled:
+                break
 
-        Entries whose resolved paths escape *output_path* (zip-slip attack)
-        are rejected before any file is written.
-        """
-        if self._zip_path is None:
-            return False
-        self.progress_label.setText("Extracting libraries...")
-        QApplication.processEvents()
-        try:
-            real_output = os.path.realpath(self.output_path)
-            with zipfile.ZipFile(self._zip_path, "r") as zf:
-                # Validate every entry before writing anything
-                for member in zf.infolist():
-                    member_dest = os.path.realpath(os.path.join(real_output, member.filename))
-                    if not (member_dest == real_output or member_dest.startswith(real_output + os.sep)):
-                        raise ValueError(f"Zip-slip rejected for entry: {member.filename!r}")
-                zf.extractall(real_output)
-            return True
-        except Exception as exc:
-            _log(f"Extraction error: {exc}", level="Critical")
-            return False
+        self._proc.wait()
+        return -1 if self._cancelled else self._proc.returncode
 
 
 def get_extlibs_install_path() -> str:
@@ -235,11 +155,38 @@ def get_extlibs_install_path() -> str:
 
 
 def install() -> None:
-    """Download and install the extra Python libraries required by CCD-Plugin."""
+    """Install the extra Python libraries required by CCD-Plugin via pip, into a
+    plugin-local extlibs/ folder (no admin rights needed, doesn't touch QGIS's own env)."""
     extlibs_dir = get_extlibs_install_path()
-    if os.path.isdir(extlibs_dir):
-        _log(f"Removing existing extlibs at: {extlibs_dir}")
-        shutil.rmtree(extlibs_dir, ignore_errors=True)
     os.makedirs(extlibs_dir, exist_ok=True)
+    requirements_path = os.path.join(_plugin_root(), "requirements.txt")
+
+    cmd = _build_pip_command(sys.executable, extlibs_dir, requirements_path)
     _log(f"Installing extra libs to: {extlibs_dir}")
-    DownloadAndUnzip(EXTLIBS_DOWNLOAD_URL, extlibs_dir)
+    dialog = PipInstall(cmd)
+
+    if dialog.returncode != 0:
+        shutil.rmtree(extlibs_dir, ignore_errors=True)
+        QMessageBox.critical(
+            None,
+            "CCD-Plugin: Error installing libs",
+            (
+                "Error installing the additional Python packages required for CCD-Plugin.\n\n"
+                "Read the install instructions here:\n"
+                "https://github.com/SMByC/CCD-Plugin#installation"
+            ),
+            QMessageBox.StandardButton.Ok,
+        )
+
+
+def _self_check() -> None:
+    cmd = _build_pip_command("PY", "EXTLIBS_DIR", "REQS.txt")
+    assert cmd[0] == "PY"
+    assert cmd[cmd.index("--target") + 1] == "EXTLIBS_DIR"
+    assert cmd[cmd.index("-r") + 1] == "REQS.txt"
+    assert cmd[-2:] == ["-r", "REQS.txt"]
+    print("extralibs._build_pip_command: ok")
+
+
+if __name__ == "__main__":
+    _self_check()

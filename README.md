@@ -44,7 +44,10 @@ added button listed below. Original and this project are both licensed under the
 1. On this repo's GitHub page, **Code → Download ZIP** (or `git clone` it).
 2. QGIS → *Plugins → Manage and Install Plugins → Install from ZIP* → pick the ZIP you just
    downloaded (if you cloned instead, zip the repo folder first).
-3. `pip install -r requirements.txt` into your QGIS Python environment.
+3. Enable the plugin. The first time it loads, it installs its required Python packages
+   automatically (a small progress dialog appears for ~10-30s, no console needed). If that
+   ever fails (e.g. no internet), run `pip install -r requirements.txt` into your QGIS Python
+   environment by hand.
 4. Run `earthengine authenticate` once (or set `EE_PRIVATE_KEY_JSON`/service-account
    credentials - see CCD_Plugin's own docs). The Earth Engine Cloud project ID itself is
    asked for in-app, the first time you click "Generate".
